@@ -4,11 +4,11 @@ import AppKit
 struct GraphView: View {
     @EnvironmentObject var library: Library
     @StateObject private var model: GraphModel
-    @Binding var useGraph: Bool
+    @Binding var appView: AppView
 
-    init(root: URL, useGraph: Binding<Bool>) {
+    init(root: URL, appView: Binding<AppView>) {
         _model = StateObject(wrappedValue: GraphModel(root: root))
-        _useGraph = useGraph
+        _appView = appView
     }
 
     @State private var scale: CGFloat = 1
@@ -21,6 +21,7 @@ struct GraphView: View {
     @State private var deleteTarget: GNode?
     @State private var scrollMonitor: Any?
     @State private var lightbox: LightboxItem?
+    @State private var infoTarget: ImageInfoItem?
 
     // Drag-and-drop of a FOLDER node onto another FOLDER node (to move it there).
     // `dragNodeID` is the folder being carried; `dropTargetID` is the highlighted
@@ -37,70 +38,74 @@ struct GraphView: View {
     private let tick = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            GraphBackground()
-            canvas
-        }
-        // Pin the content top-leading (not centered) so it never shifts under the
-        // toolbar when the zoomed canvas grows larger than the window — this also
-        // keeps the pan/zoom math (screen = content · scale + pan) consistent.
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(white: 0.09))
-        .background(GeometryReader { g in
-            Color.clear
-                .onAppear { viewportSize = g.size }
-                .onChange(of: g.size) { viewportSize = $0; clampPan() }
-        })
-        .contentShape(Rectangle())
-        // Pan + pinch live on the FULL viewport (not the canvas) so they work over
-        // empty space too — node taps still win (tap vs. drag disambiguation).
-        .gesture(
-            DragGesture()
-                .onChanged { g in
-                    pan.width += g.translation.width - lastDrag.width
-                    pan.height += g.translation.height - lastDrag.height
-                    lastDrag = g.translation
-                    clampPan()   // can't fling the nodes off-screen
+        // A GeometryReader ALWAYS reports its proposed (window) size, independent of
+        // its content. We frame the canvas layer to that exact size — an explicit
+        // .frame(width:height:) does NOT grow with its child — so however large the
+        // zoomed canvas gets, it just overflows and is clipped; the container stays
+        // window-sized. The toolbar/lightbox are overlaid on the GeometryReader, so
+        // they're pinned to the window and never shift under a big zoomed graph.
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                GraphBackground()
+                canvas
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            .background(Color(white: 0.09))
+            .contentShape(Rectangle())
+            // Pan + pinch live on the FULL viewport (not the canvas) so they work over
+            // empty space too — node taps still win (tap vs. drag disambiguation).
+            .gesture(
+                DragGesture()
+                    .onChanged { g in
+                        pan.width += g.translation.width - lastDrag.width
+                        pan.height += g.translation.height - lastDrag.height
+                        lastDrag = g.translation
+                        clampPan()   // can't fling the nodes off-screen
+                    }
+                    .onEnded { _ in lastDrag = .zero }
+            )
+            .simultaneousGesture(
+                MagnificationGesture()
+                    .onChanged { m in
+                        if pinchStartScale == nil { pinchStartScale = scale }
+                        let amplified = CGFloat(pow(Double(m), 1.6))   // a touch more sensitive
+                        zoom(to: (pinchStartScale ?? scale) * amplified, at: cursorLoc)
+                    }
+                    .onEnded { _ in pinchStartScale = nil }
+            )
+            .onContinuousHover { phase in
+                if case .active(let loc) = phase { cursorLoc = loc }
+            }
+            .clipped()
+            .onAppear {
+                viewportSize = geo.size
+                model.start()
+                if scrollMonitor == nil {
+                    // Two-finger trackpad swipe pans the canvas (same direction as a
+                    // click-drag). Pinch-to-zoom stays on the separate magnify gesture.
+                    scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                        // Freeze the canvas while the preview overlay is open.
+                        guard lightbox == nil else { return event }
+                        pan.width += event.scrollingDeltaX
+                        pan.height += event.scrollingDeltaY
+                        clampPan()
+                        return event
+                    }
                 }
-                .onEnded { _ in lastDrag = .zero }
-        )
-        .simultaneousGesture(
-            MagnificationGesture()
-                .onChanged { m in
-                    if pinchStartScale == nil { pinchStartScale = scale }
-                    let amplified = CGFloat(pow(Double(m), 1.6))   // a touch more sensitive
-                    zoom(to: (pinchStartScale ?? scale) * amplified, at: cursorLoc)
-                }
-                .onEnded { _ in pinchStartScale = nil }
-        )
-        .onContinuousHover { phase in
-            if case .active(let loc) = phase { cursorLoc = loc }
+            }
+            .onChange(of: geo.size) { viewportSize = $0; clampPan() }
+            .onDisappear {
+                if let m = scrollMonitor { NSEvent.removeMonitor(m); scrollMonitor = nil }
+            }
         }
-        .clipped()
-        // Fixed chrome, layered on the WINDOW-sized container (after clipping) so it
-        // stays put no matter how large or offset the zoomed canvas becomes.
+        // Fixed chrome, layered on the always-window-sized GeometryReader so it stays
+        // put no matter how large or offset the zoomed canvas becomes.
         .overlay(alignment: .top) { topBar }
         .overlay {
             if let lb = lightbox {
                 LightboxView(item: lb) { lightbox = nil }
                     .transition(.opacity)
             }
-        }
-        .onAppear {
-            model.start()
-            if scrollMonitor == nil {
-                // Two-finger trackpad swipe pans the canvas (same direction as a
-                // click-drag). Pinch-to-zoom stays on the separate magnify gesture.
-                scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-                    pan.width += event.scrollingDeltaX
-                    pan.height += event.scrollingDeltaY
-                    clampPan()
-                    return event
-                }
-            }
-        }
-        .onDisappear {
-            if let m = scrollMonitor { NSEvent.removeMonitor(m); scrollMonitor = nil }
         }
         .onReceive(tick) { _ in if renameTarget == nil, deleteTarget == nil { model.refresh() } }
         .sheet(item: $renameTarget) { node in
@@ -114,6 +119,9 @@ struct GraphView: View {
             Button("Move to Trash", role: .destructive) { model.trash(node); deleteTarget = nil }
             Button("Cancel", role: .cancel) { deleteTarget = nil }
         } message: { _ in Text("Goes to the Trash (recoverable). Scoped to the opened folder.") }
+        .sheet(item: $infoTarget) { info in
+            ImageInfoView(url: info.url) { infoTarget = nil }
+        }
     }
 
     // MARK: - Canvas
@@ -232,7 +240,10 @@ struct GraphView: View {
             ImageTile(url: node.url, accent: node.accent,
                       shouldLoad: scale >= thumbLODThreshold,
                       scale: scale,
-                      onOpen: { openLightbox(node.siblingImages, current: node.url) })
+                      onOpen: { openLightbox(node.siblingImages, current: node.url) },
+                      onInfo: { infoTarget = ImageInfoItem(url: node.url) },
+                      onReveal: { model.reveal(node) },
+                      onTrash: { deleteTarget = node })
                 .position(x: node.center.x * scale, y: node.center.y * scale)
                 // Fade in on open / out on close — same transition both ways.
                 .transition(.opacity)
@@ -384,21 +395,9 @@ struct GraphView: View {
                 Text(err).font(.caption).foregroundColor(.orange).lineLimit(1)
             }
             Spacer()
-            chip("minus.magnifyingglass") { zoom(to: scale - 0.15, at: CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)) }
-            Text("\(Int(scale * 100))%").font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.7)).frame(width: 38)
-            chip("plus.magnifyingglass") { zoom(to: scale + 0.15, at: CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)) }
-            chip("arrow.counterclockwise") { scale = 1; pan = .init(width: 40, height: 40) }
             chip("rectangle.expand.vertical") { model.expandAll() }
             chip("rectangle.compress.vertical") { model.collapseAll() }
-            chip("arrow.clockwise") { model.refresh() }
-            chip("folder") { library.openPanel() }
-            Button { useGraph = false } label: {
-                Label("Finder view", systemImage: "square.grid.2x2")
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .buttonStyle(.plain).foregroundColor(.white)
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(Capsule().fill(Color.white.opacity(0.12)))
+            ViewSwitcher(appView: $appView, dark: true)
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
         .background(.ultraThinMaterial)
@@ -543,6 +542,9 @@ struct ImageTile: View {
     /// Zoom level — baked into the tile edge + internal metrics so it renders sharp.
     var scale: CGFloat = 1
     let onOpen: () -> Void
+    var onInfo: () -> Void = {}
+    var onReveal: () -> Void = {}
+    var onTrash: () -> Void = {}
 
     @State private var image: NSImage?
 
@@ -569,6 +571,13 @@ struct ImageTile: View {
         .shadow(color: .black.opacity(0.4), radius: 4 * scale, x: 0, y: 2 * scale)
         .contentShape(Rectangle())
         .onTapGesture { onOpen() }
+        .contextMenu {
+            Button("Open") { onOpen() }
+            Button("Show Info") { onInfo() }
+            Button("Reveal in Finder") { onReveal() }
+            Divider()
+            Button("Move to Trash") { onTrash() }
+        }
         .onChange(of: shouldLoad) { load in if load { loadIfNeeded() } }
         .onAppear { if shouldLoad { loadIfNeeded() } }
         .help(url.lastPathComponent)

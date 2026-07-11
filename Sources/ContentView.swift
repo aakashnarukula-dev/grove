@@ -1,19 +1,16 @@
 import SwiftUI
 import AppKit
 
-enum ViewMode: String { case grid, list, column }
-
 struct ContentView: View {
     @EnvironmentObject var library: Library
     @StateObject private var store: FolderStore
-    @Binding var useGraph: Bool
+    @Binding var appView: AppView
 
-    init(root: URL, useGraph: Binding<Bool>) {
+    init(root: URL, appView: Binding<AppView>) {
         _store = StateObject(wrappedValue: FolderStore(root: root))
-        _useGraph = useGraph
+        _appView = appView
     }
 
-    @State private var mode: ViewMode = .grid
     @State private var renameTarget: FolderItem?
     @State private var deleteTarget: FolderItem?
 
@@ -32,7 +29,7 @@ struct ContentView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { store.load() }
         .onReceive(tick) { _ in
-            if mode != .column, renameTarget == nil, deleteTarget == nil { store.load() }
+            if appView != .column, renameTarget == nil, deleteTarget == nil { store.load() }
         }
         .sheet(item: $renameTarget) { target in
             RenameSheet(originalName: target.name) { newName in
@@ -57,31 +54,20 @@ struct ContentView: View {
     private var header: some View {
         HStack(spacing: 12) {
             backForward
-            if mode == .column {
+            if appView == .column {
                 Text(store.root.lastPathComponent).font(.headline)
             } else {
                 breadcrumb
             }
             Spacer()
-            if mode != .column {
+            if appView != .column {
                 Text(folderCountSummary).font(.callout).foregroundColor(.secondary)
             }
             Button { store.load() } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.borderless).help("Refresh")
             Button { library.openPanel() } label: { Image(systemName: "folder") }
                 .buttonStyle(.borderless).help("Open a different folder (⌘O)")
-            Button { useGraph = true } label: {
-                Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
-            }
-            .buttonStyle(.plain).help("Switch to node graph")
-            Picker("", selection: $mode) {
-                Image(systemName: "square.grid.2x2").tag(ViewMode.grid)
-                Image(systemName: "list.bullet").tag(ViewMode.list)
-                Image(systemName: "rectangle.split.3x1").tag(ViewMode.column)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 116)
-            .labelsHidden()
+            ViewSwitcher(appView: $appView, dark: false)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -90,8 +76,8 @@ struct ContentView: View {
     /// Finder-style back/forward pair. Always present; each greys out when there's
     /// nowhere to go (so at the root both are disabled). Disabled in column mode.
     private var backForward: some View {
-        let backOff = mode == .column || !store.canGoBack
-        let fwdOff  = mode == .column || !store.canGoForward
+        let backOff = appView == .column || !store.canGoBack
+        let fwdOff  = appView == .column || !store.canGoForward
         return HStack(spacing: 0) {
             Button { store.goBack() } label: {
                 Image(systemName: "chevron.left").frame(width: 30, height: 20)
@@ -149,7 +135,7 @@ struct ContentView: View {
     // MARK: - Content
 
     @ViewBuilder private var content: some View {
-        if mode == .column {
+        if appView == .column {
             ColumnBrowser(store: store, renameTarget: $renameTarget, deleteTarget: $deleteTarget)
         } else if store.items.isEmpty && store.errorMessage == nil {
             VStack(spacing: 8) {
@@ -157,7 +143,7 @@ struct ContentView: View {
                 Text("Empty").foregroundColor(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if mode == .grid {
+        } else if appView == .grid {
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 116, maximum: 150), spacing: 18)],
                           alignment: .leading, spacing: 18) {

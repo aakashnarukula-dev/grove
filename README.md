@@ -38,10 +38,26 @@ drag-to-move, rename, and move-to-trash.
 - Grove stores no data of its own beyond your recent-folders list; the folder on
   disk is the single source of truth.
 
+## Install
+
+**Download (no build needed)** — grab the latest
+[**release**](https://github.com/aakashnarukula-dev/grove/releases/latest):
+
+1. Download `Grove-1.0-macOS-universal.zip` and unzip it.
+2. Drag **Grove.app** into your **Applications** folder.
+3. First launch only: Grove is open source and not notarized by Apple, so
+   **right-click Grove.app → Open**, then click **Open** in the dialog. If macOS
+   says it's "damaged", clear the quarantine flag:
+   `xattr -dr com.apple.quarantine /Applications/Grove.app`
+
+The release build is a **universal binary** — it runs on both Apple Silicon and
+Intel Macs.
+
 ## Requirements
 
 - macOS 13 (Ventura) or later
-- Swift toolchain (bundled with the Xcode Command Line Tools: `xcode-select --install`)
+- To build from source: the Swift toolchain (bundled with the Xcode Command Line
+  Tools — `xcode-select --install`)
 
 ## Build & run
 

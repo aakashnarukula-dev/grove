@@ -54,24 +54,36 @@ struct GraphView: View {
     /// tip. Near 1.0 so the card appears only once the pen has REACHED the tip —
     /// it lands on a finished line, never mid-draw.
     private let nodeLandFraction: Double = 0.96
+    /// How long the card takes to be SWALLOWED back into the branch-tip point on
+    /// close. The branch retract is delayed by exactly this (see edgesLayer /
+    /// edgeDrawTransition) so the sequence reads: card sucks into the tip FIRST,
+    /// THEN the branch pulls back into the parent — a clean two-step retract.
+    private let cardCollapse: Double = 0.18
 
-    /// Per-child insert/remove transition: the card/tile emerges AT the branch tip
-    /// (a tight, quick scale-up in place, centered) only AFTER
-    /// its branch has drawn. All of a node's children land TOGETHER — no sibling
-    /// stagger — once their (simultaneously drawn) branches reach the tips. On
-    /// collapse they all leave at once, snapping back toward the parent as the
-    /// branches retract. A `.transition(...)`, i.e. a transient transform SwiftUI
-    /// applies only during insert/remove — NOT a persistent `.scaleEffect` (that
-    /// rasterizes then upscales and blurs text).
+    /// Per-child insert/remove transition: the card is BORN FROM the branch tip.
+    /// Its scale is anchored at the LEADING (left-port) side — the exact point where
+    /// the branch connects to the card — and starts from essentially a POINT (~2%),
+    /// so on open it BUDS out of the tip and unfolds into the full card (fading up as
+    /// it grows), never a rectangle sliding in from the left. It emerges only AFTER
+    /// its branch has inked out to the tip (openDelay ≈ branchDraw · nodeLandFraction).
+    /// All of a node's children land TOGETHER — no sibling stagger. On collapse each
+    /// card is SWALLOWED back into that same tip point (scale → point at the leading
+    /// port, fading out); the branch retract is DELAYED by `cardCollapse` so the card
+    /// vanishes into the tip FIRST, then the branch pulls back into the parent.
+    /// A `.transition(...)`, i.e. a transient transform SwiftUI applies only during
+    /// insert/remove — NOT a persistent `.scaleEffect` (that rasterizes then upscales
+    /// and blurs text).
     private var growTransition: AnyTransition {
         let openDelay = branchDraw * nodeLandFraction
         return .asymmetric(
-            // A well-damped settle (not a bouncy pop): the card is PLACED at the tip,
-            // scaling up in place, centered (no horizontal slide).
-            insertion: .scale(scale: 0.16, anchor: .center).combined(with: .opacity)
-                .animation(.spring(response: 0.24, dampingFraction: 0.92).delay(openDelay)),
-            removal: .scale(scale: 0.16, anchor: .center).combined(with: .opacity)
-                .animation(.easeIn(duration: 0.16)))
+            // Bud from the tip: near-zero scale at the leading (branch-connection)
+            // port, unfolding into the card. Well-damped settle — placed, not bouncy.
+            insertion: .scale(scale: 0.02, anchor: .leading).combined(with: .opacity)
+                .animation(.spring(response: 0.26, dampingFraction: 0.9).delay(openDelay)),
+            // Suck back into the tip point (same leading anchor), quick + snappy, so
+            // it's gone before the branch begins retracting into the parent.
+            removal: .scale(scale: 0.02, anchor: .leading).combined(with: .opacity)
+                .animation(.easeIn(duration: cardCollapse)))
     }
 
     var body: some View {
@@ -192,19 +204,21 @@ struct GraphView: View {
                 // and pulls it back child→parent as it's removed — a growing /
                 // retracting branch, not a fade. All of a node's branches draw at
                 // once (no stagger), so they fan out from the joint simultaneously.
+                // On close the retract is DELAYED by cardCollapse so the child card
+                // has already been swallowed into the tip before the branch pulls back.
                 .transition(edgeDrawTransition(from: e.from, to: e.to, scale: scale,
-                                               draw: branchDraw))
+                                               draw: branchDraw, retractDelay: cardCollapse))
             Circle().fill(e.color).frame(width: 6 * scale, height: 6 * scale)
                 .position(x: e.to.x * scale, y: e.to.y * scale)
                 // The tip dot pops in at the child end AFTER its branch has drawn out
-                // to it (delay = most of the draw), and on close it leaves FIRST — as
-                // soon as its branch begins retracting — so it never floats over a
-                // retracting thread.
+                // to it (delay = most of the draw). On close it stays put — the point
+                // the card collapses INTO — until the card is gone (delay = card-
+                // Collapse), then leaves as its branch begins to retract.
                 .transition(.asymmetric(
                     insertion: .scale.combined(with: .opacity)
                         .animation(.easeOut(duration: 0.14).delay(branchDraw * 0.96)),
                     removal: .scale.combined(with: .opacity)
-                        .animation(.easeIn(duration: 0.10))))
+                        .animation(.easeIn(duration: 0.10).delay(cardCollapse))))
         }
         .frame(width: layout.size.width * scale, height: layout.size.height * scale)
     }
@@ -688,10 +702,17 @@ struct ImageTile: View {
 /// insert each is held at progress 0 (invisible) then draws parent→child; on removal
 /// each retracts child→parent. Each direction runs on its own even-speed curve — no
 /// fade, a real growing/retracting limb.
-func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat, draw: Double) -> AnyTransition {
+func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat, draw: Double,
+                        retractDelay: Double = 0) -> AnyTransition {
     // `draw` IS the branchDraw knob, so the card's land time (branchDraw * nodeLand-
     // Fraction) is measured against the SAME duration the branch actually inks over —
     // the card lands right as the pen reaches the finished tip, never mid-draw.
+    //
+    // On removal the trim runs identity(1)→active(0): since the path starts
+    // `move(to: parent)`, `to:progress` reveals from the PARENT end, so shrinking
+    // progress 1→0 pulls the visible curve back from the child tip toward the
+    // parent — the branch retracts INTO the parent. `retractDelay` holds that
+    // retract until the child card has been swallowed into the tip first.
     .asymmetric(
         insertion: .modifier(
             active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
@@ -700,7 +721,7 @@ func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat, draw: Double
         removal: .modifier(
             active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
             identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
-            .animation(.easeIn(duration: draw)))
+            .animation(.easeIn(duration: draw).delay(retractDelay)))
 }
 
 /// Masks a connector with a trimmed stroke of the SAME curve; animating `progress`

@@ -20,6 +20,12 @@ struct GNode: Identifiable {
     /// Sibling image URLs in the same folder, in display order — handed to the
     /// lightbox so it can build the filmstrip without re-listing the directory.
     let siblingImages: [URL]
+    /// Position among this node's parent's children (0 = first/topmost) and how
+    /// many siblings share the parent joint. Lets the graph land a child card/tile
+    /// at the TIP of its branch in the same staggered order the branch is drawn —
+    /// and leave in reverse order on collapse. 0/1 for the root (no parent).
+    let siblingIndex: Int
+    let siblingCount: Int
 }
 
 struct GEdge: Identifiable {
@@ -27,6 +33,12 @@ struct GEdge: Identifiable {
     let from: CGPoint       // parent output port
     let to: CGPoint         // child input port
     let color: Color
+    /// Order of this branch among its siblings (0 = first/topmost drawn) and the
+    /// sibling total. Drives the "hand-drawn" fan-out: each branch's ink-out is
+    /// delayed by its index so limbs draw ONE AFTER ANOTHER from the shared parent
+    /// joint, and on collapse the LAST-drawn branch retracts FIRST (reverse stagger).
+    let siblingIndex: Int
+    let siblingCount: Int
 }
 
 struct GraphLayout {
@@ -162,7 +174,8 @@ final class GraphModel: ObservableObject {
         var edges: [GEdge] = []
         var nextLeafY: CGFloat = 0
 
-        func visit(url: URL, name: String, isDir: Bool, count: Int, pics: Int, depth: Int, accent: Color) -> CGPoint {
+        func visit(url: URL, name: String, isDir: Bool, count: Int, pics: Int, depth: Int, accent: Color,
+                   order: Int, siblingTotal: Int) -> CGPoint {
             let id = url.path
             let isExp = expanded.contains(id)
             let kids = (isDir && isExp) ? children(id) : []
@@ -188,10 +201,13 @@ final class GraphModel: ObservableObject {
                     let cx = gridX + Self.tile / 2 + CGFloat(col) * Self.gridStep
                     let cy = folderY + Self.tile / 2 + CGFloat(row) * Self.gridStep
                     let center = CGPoint(x: cx, y: cy)
+                    // Tiles land in ROW order so each row appears as its branch (one
+                    // per row) reaches it — same staggered fan-out as folder children.
                     nodes.append(GNode(id: kid.url.path, name: kid.name, url: kid.url,
                                        isDirectory: false, count: 0, pictureCount: 0,
                                        depth: depth + 1, expanded: false, accent: accent,
-                                       center: center, isImage: true, siblingImages: siblingURLs))
+                                       center: center, isImage: true, siblingImages: siblingURLs,
+                                       siblingIndex: row, siblingCount: rows))
                     if col == 0 { childCenters.append((kid.url.path, center)) }   // one edge per row, to the row's first tile
                 }
                 let gridHeight = CGFloat(rows) * Self.gridStep
@@ -206,7 +222,8 @@ final class GraphModel: ObservableObject {
                     // from the palette; deeper folders inherit their branch's color.
                     let kidAccent = depth == 0 ? Self.accent(i) : accent
                     let c = visit(url: kid.url, name: kid.name, isDir: kid.isDirectory,
-                                  count: kid.subfolderCount, pics: kid.pictureCount, depth: depth + 1, accent: kidAccent)
+                                  count: kid.subfolderCount, pics: kid.pictureCount, depth: depth + 1, accent: kidAccent,
+                                  order: i, siblingTotal: kids.count)
                     childCenters.append((kid.url.path, c))
                 }
                 y = childCenters.map(\.center.y).reduce(0, +) / CGFloat(childCenters.count)
@@ -218,16 +235,19 @@ final class GraphModel: ObservableObject {
             let center = CGPoint(x: x, y: y)
             nodes.append(GNode(id: id, name: name, url: url, isDirectory: isDir, count: count,
                                pictureCount: pics, depth: depth, expanded: isExp, accent: accent,
-                               center: center, isImage: false, siblingImages: []))
+                               center: center, isImage: false, siblingImages: [],
+                               siblingIndex: order, siblingCount: siblingTotal))
             let out = CGPoint(x: center.x + Self.nodeW / 2, y: center.y)
-            for child in childCenters {
+            for (i, child) in childCenters.enumerated() {
                 // Folder children connect at their left edge; image tiles at theirs.
                 let half = isPictureGrid ? Self.tile / 2 : Self.nodeW / 2
                 let inPort = CGPoint(x: child.center.x - half, y: child.center.y)
                 // STABLE id (parent→child) so the edge ANIMATES with the nodes when
-                // the tree reflows, instead of being torn down and recreated.
+                // the tree reflows, instead of being torn down and recreated. The
+                // (index, count) among siblings drives the staggered branch draw.
                 edges.append(GEdge(id: "\(id)->\(child.id)", from: out, to: inPort,
-                                   color: accent.opacity(0.55)))
+                                   color: accent.opacity(0.55),
+                                   siblingIndex: i, siblingCount: childCenters.count))
             }
             return center
         }
@@ -235,7 +255,8 @@ final class GraphModel: ObservableObject {
         let root = fs.root
         let rootCount = children(root.path).count
         _ = visit(url: root, name: rootName, isDir: true,
-                  count: rootCount, pics: 0, depth: 0, accent: Color(white: 0.55))
+                  count: rootCount, pics: 0, depth: 0, accent: Color(white: 0.55),
+                  order: 0, siblingTotal: 1)
 
         let maxX = (nodes.map { $0.center.x }.max() ?? 0) + Self.nodeW / 2 + Self.pad
         let maxY = (nodes.map { $0.center.y }.max() ?? 0) + Self.rowH + Self.pad

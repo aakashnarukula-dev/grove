@@ -37,15 +37,39 @@ struct GraphView: View {
 
     private let tick = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
-    /// The insert/remove transition for tree children. Anchored `.leading` — the
-    /// edge nearest the parent (the tidy tree lays children to the RIGHT) — so a
-    /// node GROWS out of its parent on open and SHRINKS back into it on close,
-    /// instead of just fading in place. Symmetric scale reads correctly both ways.
-    /// This is `.transition(...)`, a real transient transform SwiftUI applies only
-    /// during insert/remove — NOT a persistent `.scaleEffect` (that rasterizes then
-    /// upscales and blurs text).
-    private let growTransition: AnyTransition =
-        .scale(scale: 0.15, anchor: .leading).combined(with: .opacity)
+    // MARK: - Hand-drawn tree timing
+    //
+    // Expanding a node should read like someone DRAWING a tree: from the single
+    // parent joint, each connector branch inks OUT one after another (staggered by
+    // sibling order), and each child node LANDS at the tip of its branch once that
+    // branch has arrived — not a soft simultaneous card fade. Collapsing reverses
+    // it: the last-drawn branch retracts first, each child leaving with its limb.
+
+    /// How long one branch takes to ink out parent→child (and to retract).
+    private let branchDraw: Double = 0.30
+    /// Gap between successive sibling branches starting to draw — the fan-out stagger.
+    private let branchStagger: Double = 0.09
+    /// Fraction of a branch's draw that must complete before its node lands at the
+    /// tip (so the pen "arrives" before the node appears).
+    private let nodeLandFraction: Double = 0.72
+
+    /// Per-child insert/remove transition: the card/tile emerges FROM the branch tip
+    /// (a tight, quick scale-up anchored on the parent side, `.leading`) only AFTER
+    /// its branch has drawn, staggered by sibling order — so nodes land one after
+    /// another like the pen placing them. On collapse they leave in REVERSE order
+    /// (last-drawn first), snapping back toward the parent as the branch retracts.
+    /// A `.transition(...)`, i.e. a transient transform SwiftUI applies only during
+    /// insert/remove — NOT a persistent `.scaleEffect` (that rasterizes then upscales
+    /// and blurs text).
+    private func growTransition(index: Int, count: Int) -> AnyTransition {
+        let openDelay = Double(index) * branchStagger + branchDraw * nodeLandFraction
+        let closeDelay = Double(count - 1 - index) * branchStagger
+        return .asymmetric(
+            insertion: .scale(scale: 0.16, anchor: .leading).combined(with: .opacity)
+                .animation(.spring(response: 0.26, dampingFraction: 0.74).delay(openDelay)),
+            removal: .scale(scale: 0.16, anchor: .leading).combined(with: .opacity)
+                .animation(.easeIn(duration: 0.16).delay(closeDelay)))
+    }
 
     var body: some View {
         // A GeometryReader ALWAYS reports its proposed (window) size, independent of
@@ -158,24 +182,30 @@ struct GraphView: View {
     @ViewBuilder
     private func edgesLayer(_ layout: GraphLayout) -> some View {
         ForEach(layout.edges) { e in
+            // Fan-out stagger: branch `i` starts inking out `i * branchStagger` after
+            // the first, so limbs draw ONE AFTER ANOTHER from the shared parent joint.
+            // On collapse the order reverses (last-drawn retracts first).
+            let openDelay = Double(e.siblingIndex) * branchStagger
+            let closeDelay = Double(e.siblingCount - 1 - e.siblingIndex) * branchStagger
             EdgeShape(from: e.from, to: e.to, scale: scale)
                 .stroke(e.color, style: StrokeStyle(lineWidth: 2.5 * scale, lineCap: .round))
                 // DRAW on open / RETRACT on close. A trim-mask transition (see
                 // edgeDrawTransition) extends the thread parent→child as it appears
                 // and pulls it back child→parent as it's removed — a growing /
-                // retracting branch, not a fade. Uses the ambient toggle animation
-                // (easeInOut 0.28–0.35s) so it moves as one motion with the node.
-                .transition(edgeDrawTransition(from: e.from, to: e.to, scale: scale))
+                // retracting branch, not a fade — staggered per sibling.
+                .transition(edgeDrawTransition(from: e.from, to: e.to, scale: scale,
+                                               openDelay: openDelay, closeDelay: closeDelay))
             Circle().fill(e.color).frame(width: 6 * scale, height: 6 * scale)
                 .position(x: e.to.x * scale, y: e.to.y * scale)
-                // The tip dot pops in at the child end AFTER the thread has drawn
-                // out to it (delayed insert), and leaves FIRST on close (immediate
-                // removal) so it never floats over a retracting thread.
+                // The tip dot pops in at the child end AFTER its branch has drawn out
+                // to it (delay = branch's stagger + most of its draw), and on close it
+                // leaves FIRST — as soon as its branch begins retracting — so it never
+                // floats over a retracting thread.
                 .transition(.asymmetric(
                     insertion: .scale.combined(with: .opacity)
-                        .animation(.easeOut(duration: 0.14).delay(0.16)),
+                        .animation(.easeOut(duration: 0.14).delay(openDelay + branchDraw * 0.8)),
                     removal: .scale.combined(with: .opacity)
-                        .animation(.easeIn(duration: 0.12))))
+                        .animation(.easeIn(duration: 0.10).delay(closeDelay))))
         }
         .frame(width: layout.size.width * scale, height: layout.size.height * scale)
     }
@@ -204,8 +234,9 @@ struct GraphView: View {
                 .offset(isDragging ? dragTranslation : .zero)
                 .zIndex(isDragging ? 100 : 0)
                 .position(x: node.center.x * scale, y: node.center.y * scale)
-                // Grow out of / shrink back into the parent on open/close.
-                .transition(growTransition)
+                // Land at the tip of its branch once that branch has drawn (staggered
+                // by sibling order); shrink back into the parent on close.
+                .transition(growTransition(index: node.siblingIndex, count: node.siblingCount))
         }
     }
 
@@ -269,8 +300,9 @@ struct GraphView: View {
                       onReveal: { model.reveal(node) },
                       onTrash: { deleteTarget = node })
                 .position(x: node.center.x * scale, y: node.center.y * scale)
-                // Grow out of / shrink back into the parent folder on open/close.
-                .transition(growTransition)
+                // Land at the tip of its (row's) branch once it's drawn, staggered by
+                // row; shrink back into the parent folder on close.
+                .transition(growTransition(index: node.siblingIndex, count: node.siblingCount))
         }
     }
 
@@ -344,7 +376,9 @@ struct GraphView: View {
         guard isPictureFolder(node) else { toggleAnchored(node); return }
         let opening = !node.expanded
         let oldCenter = node.center
-        withAnimation(.easeInOut(duration: 0.35)) {
+        // Governs the reflow GLIDE of surviving nodes/edges + the pan pin — the
+        // per-branch draw/tip/node transitions carry their own staggered animations.
+        withAnimation(.easeInOut(duration: 0.42)) {
             model.toggle(node)
             anchorPan(id: node.id, oldCenter: oldCenter)   // folder stays exactly put
             if opening { revealGrid(folderID: node.id) }   // nudge into view ONLY if needed
@@ -396,7 +430,8 @@ struct GraphView: View {
     /// Open/close a (non-picture) folder, pinned + animated.
     private func toggleAnchored(_ node: GNode) {
         let oldCenter = node.center
-        withAnimation(.easeInOut(duration: 0.28)) {
+        // Reflow glide + pan pin; the branch/tip/node draws animate themselves.
+        withAnimation(.easeInOut(duration: 0.40)) {
             model.toggle(node)
             anchorPan(id: node.id, oldCenter: oldCenter)
             clampPan()
@@ -649,10 +684,23 @@ struct ImageTile: View {
 /// symmetrically, using the ambient toggle animation. We drive the trim via a MASK
 /// (not by re-stroking the shape) so the visible thread is pixel-identical to the
 /// steady-state stroke — the reveal just slides along it.
-func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat) -> AnyTransition {
-    .modifier(
-        active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
-        identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
+///
+/// `openDelay`/`closeDelay` stagger the draw per sibling so branches ink out one
+/// after another on expand and retract last-first on collapse. Each direction runs
+/// on its own even-speed curve; during its delay the branch is held at progress 0
+/// (invisible) on insert / progress 1 (fully drawn) on removal, then animates — no
+/// fade, a real growing/retracting limb.
+func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat,
+                        openDelay: Double, closeDelay: Double) -> AnyTransition {
+    .asymmetric(
+        insertion: .modifier(
+            active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
+            identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
+            .animation(.easeInOut(duration: 0.30).delay(openDelay)),
+        removal: .modifier(
+            active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
+            identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
+            .animation(.easeIn(duration: 0.28).delay(closeDelay)))
 }
 
 /// Masks a connector with a trimmed stroke of the SAME curve; animating `progress`

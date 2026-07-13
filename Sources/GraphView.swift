@@ -40,53 +40,38 @@ struct GraphView: View {
     // MARK: - Hand-drawn tree timing
     //
     // Expanding a node should read like someone DRAWING a tree: from the single
-    // parent joint, each connector branch inks OUT one after another (staggered by
-    // sibling order), and each child node LANDS at the tip of its branch once that
-    // branch has arrived — not a soft simultaneous card fade. Collapsing reverses
-    // it: the last-drawn branch retracts first, each child leaving with its limb.
+    // clicked-node joint, ALL of that node's connector branches ink OUT at once
+    // (simultaneously — no sibling stagger), and each child node LANDS at the tip of
+    // its branch once that branch has arrived — not a soft simultaneous card fade.
+    // Collapsing reverses it: every branch retracts together, each child leaving
+    // with its limb. Only the CLICKED node's own new branches animate; ancestor
+    // branches stay still (the layout anchors each node on its subtree top, so
+    // expanding a descendant never re-centers its ancestors — see GraphModel).
 
     /// How long one branch takes to ink out parent→child (and to retract).
     private let branchDraw: Double = 0.28
-    /// Gap between successive sibling branches starting to draw — the fan-out stagger.
-    /// Big enough that each branch visibly completes (and its card lands) before the
-    /// next clearly begins — the pen moving to the next limb.
-    private let branchStagger: Double = 0.14
     /// Fraction of a branch's draw that must complete before its node lands at the
     /// tip. Near 1.0 so the card appears only once the pen has REACHED the tip —
     /// it lands on a finished line, never mid-draw.
     private let nodeLandFraction: Double = 0.96
-    /// Cap on how long after the first branch the LAST sibling branch may START, so
-    /// a big fan-out (e.g. a 20-picture grid) still finishes in ~1s instead of many
-    /// seconds. `effectiveStagger` shrinks the per-branch gap once there are enough
-    /// siblings that `branchStagger * (count-1)` would exceed this.
-    private let maxFanoutSpread: Double = 1.1
-
-    /// Per-sibling stagger, capped for large fan-outs. Few children → full
-    /// `branchStagger` (clearly sequential); many children → gap shrinks so the last
-    /// branch still starts within `maxFanoutSpread` of the first.
-    private func effectiveStagger(_ count: Int) -> Double {
-        min(branchStagger, maxFanoutSpread / Double(max(count - 1, 1)))
-    }
 
     /// Per-child insert/remove transition: the card/tile emerges FROM the branch tip
     /// (a tight, quick scale-up anchored on the parent side, `.leading`) only AFTER
-    /// its branch has drawn, staggered by sibling order — so nodes land one after
-    /// another like the pen placing them. On collapse they leave in REVERSE order
-    /// (last-drawn first), snapping back toward the parent as the branch retracts.
-    /// A `.transition(...)`, i.e. a transient transform SwiftUI applies only during
-    /// insert/remove — NOT a persistent `.scaleEffect` (that rasterizes then upscales
-    /// and blurs text).
-    private func growTransition(index: Int, count: Int) -> AnyTransition {
-        let stagger = effectiveStagger(count)
-        let openDelay = Double(index) * stagger + branchDraw * nodeLandFraction
-        let closeDelay = Double(count - 1 - index) * stagger
+    /// its branch has drawn. All of a node's children land TOGETHER — no sibling
+    /// stagger — once their (simultaneously drawn) branches reach the tips. On
+    /// collapse they all leave at once, snapping back toward the parent as the
+    /// branches retract. A `.transition(...)`, i.e. a transient transform SwiftUI
+    /// applies only during insert/remove — NOT a persistent `.scaleEffect` (that
+    /// rasterizes then upscales and blurs text).
+    private var growTransition: AnyTransition {
+        let openDelay = branchDraw * nodeLandFraction
         return .asymmetric(
             // A well-damped settle (not a bouncy pop): the card is PLACED at the tip,
             // still scaling up from the branch-connection edge (.leading).
             insertion: .scale(scale: 0.16, anchor: .leading).combined(with: .opacity)
                 .animation(.spring(response: 0.24, dampingFraction: 0.92).delay(openDelay)),
             removal: .scale(scale: 0.16, anchor: .leading).combined(with: .opacity)
-                .animation(.easeIn(duration: 0.16).delay(closeDelay)))
+                .animation(.easeIn(duration: 0.16)))
     }
 
     var body: some View {
@@ -200,32 +185,26 @@ struct GraphView: View {
     @ViewBuilder
     private func edgesLayer(_ layout: GraphLayout) -> some View {
         ForEach(layout.edges) { e in
-            // Fan-out stagger: branch `i` starts inking out `i * branchStagger` after
-            // the first, so limbs draw ONE AFTER ANOTHER from the shared parent joint.
-            // On collapse the order reverses (last-drawn retracts first).
-            let stagger = effectiveStagger(e.siblingCount)
-            let openDelay = Double(e.siblingIndex) * stagger
-            let closeDelay = Double(e.siblingCount - 1 - e.siblingIndex) * stagger
             EdgeShape(from: e.from, to: e.to, scale: scale)
                 .stroke(e.color, style: StrokeStyle(lineWidth: 2.5 * scale, lineCap: .round))
                 // DRAW on open / RETRACT on close. A trim-mask transition (see
                 // edgeDrawTransition) extends the thread parent→child as it appears
                 // and pulls it back child→parent as it's removed — a growing /
-                // retracting branch, not a fade — staggered per sibling.
+                // retracting branch, not a fade. All of a node's branches draw at
+                // once (no stagger), so they fan out from the joint simultaneously.
                 .transition(edgeDrawTransition(from: e.from, to: e.to, scale: scale,
-                                               draw: branchDraw,
-                                               openDelay: openDelay, closeDelay: closeDelay))
+                                               draw: branchDraw))
             Circle().fill(e.color).frame(width: 6 * scale, height: 6 * scale)
                 .position(x: e.to.x * scale, y: e.to.y * scale)
                 // The tip dot pops in at the child end AFTER its branch has drawn out
-                // to it (delay = branch's stagger + most of its draw), and on close it
-                // leaves FIRST — as soon as its branch begins retracting — so it never
-                // floats over a retracting thread.
+                // to it (delay = most of the draw), and on close it leaves FIRST — as
+                // soon as its branch begins retracting — so it never floats over a
+                // retracting thread.
                 .transition(.asymmetric(
                     insertion: .scale.combined(with: .opacity)
-                        .animation(.easeOut(duration: 0.14).delay(openDelay + branchDraw * 0.96)),
+                        .animation(.easeOut(duration: 0.14).delay(branchDraw * 0.96)),
                     removal: .scale.combined(with: .opacity)
-                        .animation(.easeIn(duration: 0.10).delay(closeDelay))))
+                        .animation(.easeIn(duration: 0.10))))
         }
         .frame(width: layout.size.width * scale, height: layout.size.height * scale)
     }
@@ -254,9 +233,9 @@ struct GraphView: View {
                 .offset(isDragging ? dragTranslation : .zero)
                 .zIndex(isDragging ? 100 : 0)
                 .position(x: node.center.x * scale, y: node.center.y * scale)
-                // Land at the tip of its branch once that branch has drawn (staggered
-                // by sibling order); shrink back into the parent on close.
-                .transition(growTransition(index: node.siblingIndex, count: node.siblingCount))
+                // Land at the tip of its branch once that branch has drawn (all
+                // siblings together); shrink back into the parent on close.
+                .transition(growTransition)
         }
     }
 
@@ -320,9 +299,9 @@ struct GraphView: View {
                       onReveal: { model.reveal(node) },
                       onTrash: { deleteTarget = node })
                 .position(x: node.center.x * scale, y: node.center.y * scale)
-                // Land at the tip of its (row's) branch once it's drawn, staggered by
-                // row; shrink back into the parent folder on close.
-                .transition(growTransition(index: node.siblingIndex, count: node.siblingCount))
+                // Land at the tip of its (row's) branch once it's drawn (all rows
+                // together); shrink back into the parent folder on close.
+                .transition(growTransition)
         }
     }
 
@@ -705,13 +684,11 @@ struct ImageTile: View {
 /// (not by re-stroking the shape) so the visible thread is pixel-identical to the
 /// steady-state stroke — the reveal just slides along it.
 ///
-/// `openDelay`/`closeDelay` stagger the draw per sibling so branches ink out one
-/// after another on expand and retract last-first on collapse. Each direction runs
-/// on its own even-speed curve; during its delay the branch is held at progress 0
-/// (invisible) on insert / progress 1 (fully drawn) on removal, then animates — no
+/// All of a node's branches ink out simultaneously (no per-sibling stagger): on
+/// insert each is held at progress 0 (invisible) then draws parent→child; on removal
+/// each retracts child→parent. Each direction runs on its own even-speed curve — no
 /// fade, a real growing/retracting limb.
-func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat, draw: Double,
-                        openDelay: Double, closeDelay: Double) -> AnyTransition {
+func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat, draw: Double) -> AnyTransition {
     // `draw` IS the branchDraw knob, so the card's land time (branchDraw * nodeLand-
     // Fraction) is measured against the SAME duration the branch actually inks over —
     // the card lands right as the pen reaches the finished tip, never mid-draw.
@@ -719,11 +696,11 @@ func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat, draw: Double
         insertion: .modifier(
             active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
             identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
-            .animation(.easeInOut(duration: draw).delay(openDelay)),
+            .animation(.easeInOut(duration: draw)),
         removal: .modifier(
             active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
             identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
-            .animation(.easeIn(duration: draw).delay(closeDelay)))
+            .animation(.easeIn(duration: draw)))
 }
 
 /// Masks a connector with a trimmed stroke of the SAME curve; animating `progress`

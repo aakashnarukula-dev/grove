@@ -226,7 +226,15 @@ final class GraphModel: ObservableObject {
                                   order: i, siblingTotal: kids.count)
                     childCenters.append((kid.url.path, c))
                 }
-                y = childCenters.map(\.center.y).reduce(0, +) / CGFloat(childCenters.count)
+                // ANCHOR the node on its subtree TOP (its first child's row), NOT the
+                // running average of its children. The DFS leaf cursor gives the first
+                // child the exact slot this node occupied while collapsed, so the
+                // node's Y is UNCHANGED when it expands — its ancestors never
+                // re-center, and only the newly-inserted child branches animate.
+                // Expanding a descendant pushes siblings BELOW down (to make room)
+                // but leaves the clicked node and every ancestor visually still.
+                // (Averaging instead made every ancestor glide on each expand.)
+                y = childCenters.first?.center.y ?? (Self.pad + nextLeafY)
             } else {
                 y = Self.pad + nextLeafY
                 nextLeafY += Self.rowH

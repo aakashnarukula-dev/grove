@@ -37,6 +37,16 @@ struct GraphView: View {
 
     private let tick = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
+    /// The insert/remove transition for tree children. Anchored `.leading` — the
+    /// edge nearest the parent (the tidy tree lays children to the RIGHT) — so a
+    /// node GROWS out of its parent on open and SHRINKS back into it on close,
+    /// instead of just fading in place. Symmetric scale reads correctly both ways.
+    /// This is `.transition(...)`, a real transient transform SwiftUI applies only
+    /// during insert/remove — NOT a persistent `.scaleEffect` (that rasterizes then
+    /// upscales and blurs text).
+    private let growTransition: AnyTransition =
+        .scale(scale: 0.15, anchor: .leading).combined(with: .opacity)
+
     var body: some View {
         // A GeometryReader ALWAYS reports its proposed (window) size, independent of
         // its content. We frame the canvas layer to that exact size — an explicit
@@ -182,6 +192,8 @@ struct GraphView: View {
                 .offset(isDragging ? dragTranslation : .zero)
                 .zIndex(isDragging ? 100 : 0)
                 .position(x: node.center.x * scale, y: node.center.y * scale)
+                // Grow out of / shrink back into the parent on open/close.
+                .transition(growTransition)
         }
     }
 
@@ -245,8 +257,8 @@ struct GraphView: View {
                       onReveal: { model.reveal(node) },
                       onTrash: { deleteTarget = node })
                 .position(x: node.center.x * scale, y: node.center.y * scale)
-                // Fade in on open / out on close — same transition both ways.
-                .transition(.opacity)
+                // Grow out of / shrink back into the parent folder on open/close.
+                .transition(growTransition)
         }
     }
 

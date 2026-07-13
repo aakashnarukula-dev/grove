@@ -55,8 +55,8 @@ struct GraphView: View {
     /// it lands on a finished line, never mid-draw.
     private let nodeLandFraction: Double = 0.96
 
-    /// Per-child insert/remove transition: the card/tile emerges FROM the branch tip
-    /// (a tight, quick scale-up anchored on the parent side, `.leading`) only AFTER
+    /// Per-child insert/remove transition: the card/tile emerges AT the branch tip
+    /// (a tight, quick scale-up in place, centered) only AFTER
     /// its branch has drawn. All of a node's children land TOGETHER — no sibling
     /// stagger — once their (simultaneously drawn) branches reach the tips. On
     /// collapse they all leave at once, snapping back toward the parent as the
@@ -67,10 +67,10 @@ struct GraphView: View {
         let openDelay = branchDraw * nodeLandFraction
         return .asymmetric(
             // A well-damped settle (not a bouncy pop): the card is PLACED at the tip,
-            // still scaling up from the branch-connection edge (.leading).
-            insertion: .scale(scale: 0.16, anchor: .leading).combined(with: .opacity)
+            // scaling up in place, centered (no horizontal slide).
+            insertion: .scale(scale: 0.16, anchor: .center).combined(with: .opacity)
                 .animation(.spring(response: 0.24, dampingFraction: 0.92).delay(openDelay)),
-            removal: .scale(scale: 0.16, anchor: .leading).combined(with: .opacity)
+            removal: .scale(scale: 0.16, anchor: .center).combined(with: .opacity)
                 .animation(.easeIn(duration: 0.16)))
     }
 

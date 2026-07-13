@@ -160,10 +160,22 @@ struct GraphView: View {
         ForEach(layout.edges) { e in
             EdgeShape(from: e.from, to: e.to, scale: scale)
                 .stroke(e.color, style: StrokeStyle(lineWidth: 2.5 * scale, lineCap: .round))
-                .transition(.opacity)   // grid threads fade in/out; tree threads glide
+                // DRAW on open / RETRACT on close. A trim-mask transition (see
+                // edgeDrawTransition) extends the thread parent→child as it appears
+                // and pulls it back child→parent as it's removed — a growing /
+                // retracting branch, not a fade. Uses the ambient toggle animation
+                // (easeInOut 0.28–0.35s) so it moves as one motion with the node.
+                .transition(edgeDrawTransition(from: e.from, to: e.to, scale: scale))
             Circle().fill(e.color).frame(width: 6 * scale, height: 6 * scale)
                 .position(x: e.to.x * scale, y: e.to.y * scale)
-                .transition(.opacity)
+                // The tip dot pops in at the child end AFTER the thread has drawn
+                // out to it (delayed insert), and leaves FIRST on close (immediate
+                // removal) so it never floats over a retracting thread.
+                .transition(.asymmetric(
+                    insertion: .scale.combined(with: .opacity)
+                        .animation(.easeOut(duration: 0.14).delay(0.16)),
+                    removal: .scale.combined(with: .opacity)
+                        .animation(.easeIn(duration: 0.12))))
         }
         .frame(width: layout.size.width * scale, height: layout.size.height * scale)
     }
@@ -623,6 +635,49 @@ struct ImageTile: View {
 }
 
 // MARK: - Edge (animatable connector)
+
+/// Directional draw/retract transition for a connector thread.
+///
+/// Research note — the goal is a stroked bezier that DRAWS parent→child on insert
+/// and RETRACTS child→parent on removal, both smoothly. `Shape.trim(from:0,to:p)`
+/// is the primitive (path starts `move(to: parent)`, so `to:p` reveals from the
+/// parent end outward), but `.onAppear`/`.onDisappear` can't drive it: `.onDisappear`
+/// fires on a view already being torn down and cannot animate it. The clean answer
+/// is `AnyTransition.modifier(active:identity:)` over an `Animatable` `ViewModifier`
+/// whose `animatableData` IS the trim progress — SwiftUI interpolates active(0)→
+/// identity(1) on insert (draw) and identity(1)→active(0) on remove (retract),
+/// symmetrically, using the ambient toggle animation. We drive the trim via a MASK
+/// (not by re-stroking the shape) so the visible thread is pixel-identical to the
+/// steady-state stroke — the reveal just slides along it.
+func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat) -> AnyTransition {
+    .modifier(
+        active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
+        identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
+}
+
+/// Masks a connector with a trimmed stroke of the SAME curve; animating `progress`
+/// 0→1 slides the reveal from the parent end out to the child. Used only by
+/// `edgeDrawTransition` during a subtree's expand/collapse — no steady-state cost.
+private struct EdgeTrimMask: ViewModifier, Animatable {
+    var from: CGPoint
+    var to: CGPoint
+    var scale: CGFloat
+    var progress: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        // Mask stroke is a touch wider than the 2.5pt thread so the round cap of
+        // the reveal never clips the edges of the visible stroke.
+        content.mask(
+            EdgeShape(from: from, to: to, scale: scale)
+                .trim(from: 0, to: max(0, min(1, progress)))
+                .stroke(style: StrokeStyle(lineWidth: 6 * scale, lineCap: .round)))
+    }
+}
 
 /// A curved parent→child connector whose endpoints ANIMATE (via animatableData),
 /// so threads glide with the nodes when the tree reflows instead of snapping.

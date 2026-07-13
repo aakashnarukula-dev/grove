@@ -449,17 +449,24 @@ struct GraphView: View {
         }
     }
 
-    /// CLOSE, the exact REVERSE of open (backward play): FIRST collapse the child
+    /// CLOSE, the exact REVERSE of open (backward play): FIRST collapse the subtree's
     /// nodes back into their tips in place (a center scale-down + fade), THEN — once
     /// they're gone — retract the branches from the tips back into the parent.
     /// `reflow` (the model toggle that removes the branches + pins the parent) is
     /// DEFERRED until after the nodes have collapsed, so the branch retract never runs
     /// alongside the node collapse — it plays strictly after, mirroring the open.
     private func closeSequenced(_ node: GNode, reflow: @escaping () -> Void) {
-        let kids = model.childIDs(of: node)
-        // Phase 1: collapse the child NODES in place — adding them to pendingReveal
-        // closes their gate, so the cards scale down (from centre) + fade over
-        // cardCollapse. The branches stay (model still expanded) so nothing retracts.
+        // ALL currently-visible descendants (not just direct children): collapsing a
+        // node tears down its WHOLE subtree, so every descendant node — grandchildren
+        // included — must collapse together. Gating only the direct children left the
+        // deeper nodes (e.g. a grandchild) hanging in mid-air after their parent went,
+        // then popping out on the toggle.
+        let kids = model.layout.nodes
+            .filter { $0.id.hasPrefix(node.id + "/") }
+            .map { $0.id }
+        // Phase 1: collapse those NODES in place — adding them to pendingReveal closes
+        // their gate, so the cards scale down (from centre) + fade over cardCollapse.
+        // The branches stay (model still expanded) so nothing retracts yet.
         withAnimation(.easeIn(duration: cardCollapse)) { pendingReveal.formUnion(kids) }
         // Phase 2: once the nodes are swallowed, retract the BRANCHES into the parent —
         // the toggle ALONE in the animated transaction so the retract actually plays.

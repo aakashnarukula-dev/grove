@@ -46,12 +46,27 @@ struct GraphView: View {
     // it: the last-drawn branch retracts first, each child leaving with its limb.
 
     /// How long one branch takes to ink out parent→child (and to retract).
-    private let branchDraw: Double = 0.30
+    private let branchDraw: Double = 0.28
     /// Gap between successive sibling branches starting to draw — the fan-out stagger.
-    private let branchStagger: Double = 0.09
+    /// Big enough that each branch visibly completes (and its card lands) before the
+    /// next clearly begins — the pen moving to the next limb.
+    private let branchStagger: Double = 0.14
     /// Fraction of a branch's draw that must complete before its node lands at the
-    /// tip (so the pen "arrives" before the node appears).
-    private let nodeLandFraction: Double = 0.72
+    /// tip. Near 1.0 so the card appears only once the pen has REACHED the tip —
+    /// it lands on a finished line, never mid-draw.
+    private let nodeLandFraction: Double = 0.96
+    /// Cap on how long after the first branch the LAST sibling branch may START, so
+    /// a big fan-out (e.g. a 20-picture grid) still finishes in ~1s instead of many
+    /// seconds. `effectiveStagger` shrinks the per-branch gap once there are enough
+    /// siblings that `branchStagger * (count-1)` would exceed this.
+    private let maxFanoutSpread: Double = 1.1
+
+    /// Per-sibling stagger, capped for large fan-outs. Few children → full
+    /// `branchStagger` (clearly sequential); many children → gap shrinks so the last
+    /// branch still starts within `maxFanoutSpread` of the first.
+    private func effectiveStagger(_ count: Int) -> Double {
+        min(branchStagger, maxFanoutSpread / Double(max(count - 1, 1)))
+    }
 
     /// Per-child insert/remove transition: the card/tile emerges FROM the branch tip
     /// (a tight, quick scale-up anchored on the parent side, `.leading`) only AFTER
@@ -62,11 +77,14 @@ struct GraphView: View {
     /// insert/remove — NOT a persistent `.scaleEffect` (that rasterizes then upscales
     /// and blurs text).
     private func growTransition(index: Int, count: Int) -> AnyTransition {
-        let openDelay = Double(index) * branchStagger + branchDraw * nodeLandFraction
-        let closeDelay = Double(count - 1 - index) * branchStagger
+        let stagger = effectiveStagger(count)
+        let openDelay = Double(index) * stagger + branchDraw * nodeLandFraction
+        let closeDelay = Double(count - 1 - index) * stagger
         return .asymmetric(
+            // A well-damped settle (not a bouncy pop): the card is PLACED at the tip,
+            // still scaling up from the branch-connection edge (.leading).
             insertion: .scale(scale: 0.16, anchor: .leading).combined(with: .opacity)
-                .animation(.spring(response: 0.26, dampingFraction: 0.74).delay(openDelay)),
+                .animation(.spring(response: 0.24, dampingFraction: 0.92).delay(openDelay)),
             removal: .scale(scale: 0.16, anchor: .leading).combined(with: .opacity)
                 .animation(.easeIn(duration: 0.16).delay(closeDelay)))
     }
@@ -185,8 +203,9 @@ struct GraphView: View {
             // Fan-out stagger: branch `i` starts inking out `i * branchStagger` after
             // the first, so limbs draw ONE AFTER ANOTHER from the shared parent joint.
             // On collapse the order reverses (last-drawn retracts first).
-            let openDelay = Double(e.siblingIndex) * branchStagger
-            let closeDelay = Double(e.siblingCount - 1 - e.siblingIndex) * branchStagger
+            let stagger = effectiveStagger(e.siblingCount)
+            let openDelay = Double(e.siblingIndex) * stagger
+            let closeDelay = Double(e.siblingCount - 1 - e.siblingIndex) * stagger
             EdgeShape(from: e.from, to: e.to, scale: scale)
                 .stroke(e.color, style: StrokeStyle(lineWidth: 2.5 * scale, lineCap: .round))
                 // DRAW on open / RETRACT on close. A trim-mask transition (see
@@ -194,6 +213,7 @@ struct GraphView: View {
                 // and pulls it back child→parent as it's removed — a growing /
                 // retracting branch, not a fade — staggered per sibling.
                 .transition(edgeDrawTransition(from: e.from, to: e.to, scale: scale,
+                                               draw: branchDraw,
                                                openDelay: openDelay, closeDelay: closeDelay))
             Circle().fill(e.color).frame(width: 6 * scale, height: 6 * scale)
                 .position(x: e.to.x * scale, y: e.to.y * scale)
@@ -203,7 +223,7 @@ struct GraphView: View {
                 // floats over a retracting thread.
                 .transition(.asymmetric(
                     insertion: .scale.combined(with: .opacity)
-                        .animation(.easeOut(duration: 0.14).delay(openDelay + branchDraw * 0.8)),
+                        .animation(.easeOut(duration: 0.14).delay(openDelay + branchDraw * 0.96)),
                     removal: .scale.combined(with: .opacity)
                         .animation(.easeIn(duration: 0.10).delay(closeDelay))))
         }
@@ -690,17 +710,20 @@ struct ImageTile: View {
 /// on its own even-speed curve; during its delay the branch is held at progress 0
 /// (invisible) on insert / progress 1 (fully drawn) on removal, then animates — no
 /// fade, a real growing/retracting limb.
-func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat,
+func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat, draw: Double,
                         openDelay: Double, closeDelay: Double) -> AnyTransition {
+    // `draw` IS the branchDraw knob, so the card's land time (branchDraw * nodeLand-
+    // Fraction) is measured against the SAME duration the branch actually inks over —
+    // the card lands right as the pen reaches the finished tip, never mid-draw.
     .asymmetric(
         insertion: .modifier(
             active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
             identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
-            .animation(.easeInOut(duration: 0.30).delay(openDelay)),
+            .animation(.easeInOut(duration: draw).delay(openDelay)),
         removal: .modifier(
             active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
             identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
-            .animation(.easeIn(duration: 0.28).delay(closeDelay)))
+            .animation(.easeIn(duration: draw).delay(closeDelay)))
 }
 
 /// Masks a connector with a trimmed stroke of the SAME curve; animating `progress`

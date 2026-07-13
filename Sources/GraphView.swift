@@ -48,41 +48,45 @@ struct GraphView: View {
     // branches stay still (the layout anchors each node on its subtree top, so
     // expanding a descendant never re-centers its ancestors — see GraphModel).
 
-    /// How long one branch takes to ink out parent→child (and to retract).
-    private let branchDraw: Double = 0.28
-    /// Fraction of a branch's draw that must complete before its node lands at the
-    /// tip. Near 1.0 so the card appears only once the pen has REACHED the tip —
-    /// it lands on a finished line, never mid-draw.
-    private let nodeLandFraction: Double = 0.96
+    /// How long one branch takes to ink out parent→child (and to retract). The child
+    /// node is held out of the tree for exactly this long on expand (see
+    /// pendingReveal / openSequenced), so it can only appear once the pen has REACHED
+    /// the tip — it blooms on a finished line, never mid-draw. The expand/collapse
+    /// `withAnimation` runs for THIS duration too, so the ambient reflow can't stretch
+    /// the branch draw past it (an ambient longer than branchDraw made the node bloom
+    /// while the branch was still only partway drawn).
+    private let branchDraw: Double = 0.30
+    /// A small gap added after the branch draw before the node blooms, so the pen has
+    /// DEMONSTRABLY reached the tip (branch fully drawn) before the node starts.
+    private let revealGap: Double = 0.05
     /// How long the card takes to be SWALLOWED back into the branch-tip point on
-    /// close. The branch retract is delayed by exactly this (see edgesLayer /
-    /// edgeDrawTransition) so the sequence reads: card sucks into the tip FIRST,
-    /// THEN the branch pulls back into the parent — a clean two-step retract.
+    /// close. On collapse the child nodes are swallowed over this FIRST, and only THEN
+    /// (state-sequenced in closeSequenced) do the branches retract — a clean, robust
+    /// two-step reverse of the open, not a fragile transition-level delay.
     private let cardCollapse: Double = 0.18
 
-    /// Per-child insert/remove transition: the card appears IN PLACE at its final
-    /// position — a pure opacity fade at FULL SIZE, with no scale and no slide, so it
-    /// never grows out of a corner or slides in from the left. It fades up only AFTER
-    /// its branch has inked out to the tip (openDelay ≈ branchDraw · nodeLandFraction).
-    /// All of a node's children land TOGETHER — no sibling stagger. On collapse each
-    /// card fades out IN PLACE FIRST (over `cardCollapse`), then the branch retracts
-    /// into the parent — the branch retract is DELAYED by exactly `cardCollapse`
-    /// elsewhere, so the card vanishes before the branch pulls back.
-    /// A `.transition(...)`, i.e. a transient effect SwiftUI applies only during
-    /// insert/remove — NOT a persistent `.scaleEffect` (that rasterizes then upscales
-    /// and blurs text).
-    private var growTransition: AnyTransition {
-        let openDelay = branchDraw * nodeLandFraction
-        return .asymmetric(
-            // Appear IN PLACE at the tip, full size — a pure fade, no scale, no slide.
-            // Fades up only AFTER its branch has inked out to the tip (openDelay).
-            insertion: .opacity
-                .animation(.easeOut(duration: 0.16).delay(openDelay)),
-            // Fade out in place FIRST (over cardCollapse), before the branch retracts
-            // into the parent — the branch retract is delayed by cardCollapse elsewhere.
-            removal: .opacity
-                .animation(.easeIn(duration: cardCollapse)))
-    }
+    /// How long the child card takes to BLOOM open out of the branch tip once it's
+    /// revealed. Snappy, not sluggish, not bouncy.
+    private let nodeEmerge: Double = 0.20
+    /// Starting scale of the emerge bloom — the card grows from this fraction of its
+    /// footprint up to 1.0 (from its CENTER, so it opens in place with no left/right
+    /// sweep), reading as coming OUT of the branch endpoint.
+    private let emergeScale: CGFloat = 0.4
+
+    /// Set of child node ids whose BRANCH is currently inking out but whose NODE has
+    /// not bloomed yet. While an id sits here, `nodesLayer`/`tilesLayer` GATE that node
+    /// invisible — opacity 0 + a modest center scale-down (see `emergeScale`) — WITHOUT
+    /// removing it from the ForEach. (Filtering it out instead would defer the sibling
+    /// BRANCH's insertion animation to the reveal, so branch + node would draw together
+    /// — a real SwiftUI gotcha we hit and verified frame-by-frame.) `branchDraw` seconds
+    /// after an expand — once the pen has reached the tip — `openSequenced` drops the
+    /// ids inside an animation, so the gate opens THEN and the card blooms out of the
+    /// tip (center scale-up + fade). This SEQUENCES the two phases from state, robustly:
+    /// the node cannot appear before its branch has drawn. On close the reverse — the
+    /// gate re-closes (card swallowed into the tip) FIRST, then the branch retracts.
+    /// The set is transient; the ~3s `model.refresh()` live-mirror loop leaves it alone
+    /// (it re-lays the tree but the gate keeps pending nodes hidden until their reveal).
+    @State private var pendingReveal: Set<String> = []
 
     var body: some View {
         // A GeometryReader ALWAYS reports its proposed (window) size, independent of
@@ -202,21 +206,25 @@ struct GraphView: View {
                 // and pulls it back child→parent as it's removed — a growing /
                 // retracting branch, not a fade. All of a node's branches draw at
                 // once (no stagger), so they fan out from the joint simultaneously.
-                // On close the retract is DELAYED by cardCollapse so the child card
-                // has already been swallowed into the tip before the branch pulls back.
-                .transition(edgeDrawTransition(from: e.from, to: e.to, scale: scale,
-                                               draw: branchDraw, retractDelay: cardCollapse))
+                // Open/close are SEQUENCED in state (openSequenced/closeSequenced): on
+                // open the node blooms only after this draw; on close this retract only
+                // runs after the node has collapsed — so the retract needs no delay.
+                .transition(edgeDrawTransition(from: e.from, to: e.to, scale: scale))
+            // The tip dot marks the child end of the branch. It is GATED invisible
+            // (opacity 0) while the branch is still inking — its child sits in
+            // pendingReveal — then fades in together with the child node blooming, the
+            // instant the branch arrives. (Opacity, NOT a conditional/filter: removing
+            // it from the ForEach row would defer the sibling branch's draw animation.)
+            // On close the child re-enters pendingReveal as it collapses, so the dot
+            // fades out with the node, just before the branch retracts.
             Circle().fill(e.color).frame(width: 6 * scale, height: 6 * scale)
                 .position(x: e.to.x * scale, y: e.to.y * scale)
-                // The tip dot pops in at the child end AFTER its branch has drawn out
-                // to it (delay = most of the draw). On close it stays put — the point
-                // the card collapses INTO — until the card is gone (delay = card-
-                // Collapse), then leaves as its branch begins to retract.
+                .opacity(edgeTipPending(e) ? 0 : 1)
                 .transition(.asymmetric(
                     insertion: .scale.combined(with: .opacity)
-                        .animation(.easeOut(duration: 0.14).delay(branchDraw * 0.96)),
+                        .animation(.easeOut(duration: 0.14)),
                     removal: .scale.combined(with: .opacity)
-                        .animation(.easeIn(duration: 0.10).delay(cardCollapse))))
+                        .animation(.easeIn(duration: cardCollapse))))
         }
         .frame(width: layout.size.width * scale, height: layout.size.height * scale)
     }
@@ -228,6 +236,14 @@ struct GraphView: View {
         ForEach(layout.nodes.filter { !$0.isImage }) { node in
             let isDragging = dragNodeID == node.id
             let isDropTarget = dropTargetID == node.id
+            // A child in its "branch drawing" phase is GATED invisible here (opacity 0
+            // + a modest center scale-down) rather than filtered out of the ForEach —
+            // filtering would defer the sibling branch's insertion animation. When its
+            // branch has reached the tip, pendingReveal drops it and this gate opens,
+            // so the card BLOOMS out of the tip in place (center scale-up + fade, no
+            // slide). The reverse on close: the gate closes first (card swallowed into
+            // the tip), then the branch retracts.
+            let hidden = pendingReveal.contains(node.id)
             NodeCard(node: node,
                      isOpen: node.expanded,
                      isDragging: isDragging,
@@ -239,15 +255,18 @@ struct GraphView: View {
                      onTrash: { deleteTarget = node },
                      onDragChanged: { translation in nodeDragChanged(node, translation: translation) },
                      onDragEnded: { nodeDragEnded(node) })
+                // Bloom/collapse GATE: transient center scale (≤ 1, so it never
+                // upscales/blurs text) + opacity, applied to the card BEFORE .position
+                // so it grows/shrinks around its own centre in place.
+                .scaleEffect(hidden ? emergeScale : 1, anchor: .center)
+                .opacity(hidden ? 0 : 1)
+                .allowsHitTesting(!hidden)
                 // While carried, offset the node by the drag so it tracks the cursor;
                 // lift it above siblings + edges via zIndex. With the .scaleEffect
                 // removed, this offset is now screen points directly — no /scale.
                 .offset(isDragging ? dragTranslation : .zero)
                 .zIndex(isDragging ? 100 : 0)
                 .position(x: node.center.x * scale, y: node.center.y * scale)
-                // Land at the tip of its branch once that branch has drawn (all
-                // siblings together); shrink back into the parent on close.
-                .transition(growTransition)
         }
     }
 
@@ -303,6 +322,9 @@ struct GraphView: View {
     @ViewBuilder
     private func tilesLayer(_ layout: GraphLayout, visible: CGRect) -> some View {
         ForEach(layout.nodes.filter { $0.isImage && pointVisible($0.center.x, $0.center.y, visible) }) { node in
+            // Same bloom/collapse gate as folder cards: tiles in the branch-drawing
+            // phase sit invisible at their tips, then bloom once the branch arrives.
+            let hidden = pendingReveal.contains(node.id)
             ImageTile(url: node.url, accent: node.accent,
                       shouldLoad: scale >= thumbLODThreshold,
                       scale: scale,
@@ -310,10 +332,10 @@ struct GraphView: View {
                       onInfo: { infoTarget = ImageInfoItem(url: node.url) },
                       onReveal: { model.reveal(node) },
                       onTrash: { deleteTarget = node })
+                .scaleEffect(hidden ? emergeScale : 1, anchor: .center)
+                .opacity(hidden ? 0 : 1)
+                .allowsHitTesting(!hidden)
                 .position(x: node.center.x * scale, y: node.center.y * scale)
-                // Land at the tip of its (row's) branch once it's drawn (all rows
-                // together); shrink back into the parent folder on close.
-                .transition(growTransition)
         }
     }
 
@@ -387,14 +409,88 @@ struct GraphView: View {
         guard isPictureFolder(node) else { toggleAnchored(node); return }
         let opening = !node.expanded
         let oldCenter = node.center
-        // Governs the reflow GLIDE of surviving nodes/edges + the pan pin — the
-        // per-branch draw/tip/node transitions carry their own staggered animations.
-        withAnimation(.easeInOut(duration: 0.42)) {
+        let reflow = {
             model.toggle(node)
             anchorPan(id: node.id, oldCenter: oldCenter)   // folder stays exactly put
             if opening { revealGrid(folderID: node.id) }   // nudge into view ONLY if needed
             clampPan()
         }
+        if opening { openSequenced(node, reflow: reflow) }
+        else { closeSequenced(node, reflow: reflow) }
+    }
+
+    /// OPEN, two-phase & robustly ordered: FIRST ink the branches out of the parent
+    /// (the child nodes are held out of the tree via `pendingReveal`, so nothing shows
+    /// at the tips yet), THEN — once the branches have reached the tips — bloom the
+    /// child nodes out of those tips. `reflow` performs the model toggle + pan pin; it
+    /// runs inside a `branchDraw`-long animation so the branch inks over exactly
+    /// branchDraw (the ambient can't stretch it), and the reveal waits branchDraw + a
+    /// small gap so the pen has demonstrably reached the tip before the node appears.
+    private func openSequenced(_ node: GNode, reflow: @escaping () -> Void) {
+        let kids = model.childIDs(of: node)
+        // Tick 0: mark the children hidden (a pendingReveal opacity+scale GATE in
+        // nodesLayer/tilesLayer — NOT a filter, which would remove them from the tree).
+        // This settles BEFORE the toggle so the branch draw isn't clobbered.
+        pendingReveal.formUnion(kids)
+        // Tick 1 (next runloop): toggle ALONE in the animated transaction, so the
+        // branches genuinely ink out over branchDraw. (Doing the toggle in the SAME
+        // runloop as the pendingReveal change defers the branch's insertion animation
+        // to the later reveal — branch + node then draw together, verified frame-by-
+        // frame. Separating them by a tick lets the branch draw first, cleanly.)
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: self.branchDraw)) { reflow() }
+            // Once the pen has reached the tip (+ a small gap), open the gate so the
+            // children BLOOM out of the tips (center scale-up + fade, over nodeEmerge).
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.branchDraw + self.revealGap) {
+                withAnimation(.easeOut(duration: self.nodeEmerge)) {
+                    self.pendingReveal.subtract(kids)
+                }
+            }
+        }
+    }
+
+    /// CLOSE, the exact REVERSE of open (backward play): FIRST collapse the child
+    /// nodes back into their tips in place (a center scale-down + fade), THEN — once
+    /// they're gone — retract the branches from the tips back into the parent.
+    /// `reflow` (the model toggle that removes the branches + pins the parent) is
+    /// DEFERRED until after the nodes have collapsed, so the branch retract never runs
+    /// alongside the node collapse — it plays strictly after, mirroring the open.
+    private func closeSequenced(_ node: GNode, reflow: @escaping () -> Void) {
+        let kids = model.childIDs(of: node)
+        // Phase 1: collapse the child NODES in place — adding them to pendingReveal
+        // closes their gate, so the cards scale down (from centre) + fade over
+        // cardCollapse. The branches stay (model still expanded) so nothing retracts.
+        withAnimation(.easeIn(duration: cardCollapse)) { pendingReveal.formUnion(kids) }
+        // Phase 2: once the nodes are swallowed, retract the BRANCHES into the parent —
+        // the toggle ALONE in the animated transaction so the retract actually plays.
+        DispatchQueue.main.asyncAfter(deadline: .now() + cardCollapse) {
+            withAnimation(.easeInOut(duration: self.branchDraw)) {
+                reflow()                                              // remove edges → branches retract
+            }
+            // Clean up the now-stale pending ids on a LATER tick so this pendingReveal
+            // change can't clobber the retract animation (same reason the open defers
+            // its toggle a tick past the hide).
+            DispatchQueue.main.async { self.clearPending(under: node.id) }
+        }
+    }
+
+    /// On collapse, drop any still-pending reveals under the closed node so a stale
+    /// scheduled reveal can't resurrect a node that's no longer in the tree.
+    private func clearPending(under parentID: String) {
+        pendingReveal = pendingReveal.filter { $0 != parentID && !$0.hasPrefix(parentID + "/") }
+    }
+
+    /// True while the child at this edge's tip is still in its branch-drawing phase
+    /// (held back in `pendingReveal`) — so the tip dot stays hidden until the branch
+    /// has arrived, matching the child node's reveal. Short-circuits to false in the
+    /// steady state (nothing pending), so it costs nothing on a normal frame.
+    private func edgeTipPending(_ e: GEdge) -> Bool {
+        guard !pendingReveal.isEmpty else { return false }
+        for cid in pendingReveal {
+            let parent = URL(fileURLWithPath: cid).deletingLastPathComponent().path
+            if e.id == "\(parent)->\(cid)" { return true }
+        }
+        return false
     }
 
     /// Pin a node: offset pan by its position delta so it stays put across a reflow.
@@ -438,15 +534,19 @@ struct GraphView: View {
         pan.height += dy
     }
 
-    /// Open/close a (non-picture) folder, pinned + animated.
+    /// Open/close a (non-picture) folder, pinned + animated. Same two-phase sequencing
+    /// as the picture path: branch first then node on open, node first then branch on
+    /// close (see openSequenced / closeSequenced).
     private func toggleAnchored(_ node: GNode) {
+        let opening = !node.expanded
         let oldCenter = node.center
-        // Reflow glide + pan pin; the branch/tip/node draws animate themselves.
-        withAnimation(.easeInOut(duration: 0.40)) {
+        let reflow = {
             model.toggle(node)
             anchorPan(id: node.id, oldCenter: oldCenter)
             clampPan()
         }
+        if opening { openSequenced(node, reflow: reflow) }
+        else { closeSequenced(node, reflow: reflow) }
     }
 
     private func pointVisible(_ x: CGFloat, _ y: CGFloat, _ rect: CGRect) -> Bool {
@@ -700,26 +800,23 @@ struct ImageTile: View {
 /// insert each is held at progress 0 (invisible) then draws parent→child; on removal
 /// each retracts child→parent. Each direction runs on its own even-speed curve — no
 /// fade, a real growing/retracting limb.
-func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat, draw: Double,
-                        retractDelay: Double = 0) -> AnyTransition {
-    // `draw` IS the branchDraw knob, so the card's land time (branchDraw * nodeLand-
-    // Fraction) is measured against the SAME duration the branch actually inks over —
-    // the card lands right as the pen reaches the finished tip, never mid-draw.
+func edgeDrawTransition(from: CGPoint, to: CGPoint, scale: CGFloat) -> AnyTransition {
+    // The trim runs active(0)↔identity(1). Since the path starts `move(to: parent)`,
+    // `to:progress` reveals from the PARENT end, so insert (0→1) inks the branch
+    // parent→child, and remove (1→0) pulls the visible curve back from the child tip
+    // toward the parent — the branch retracts INTO the parent.
     //
-    // On removal the trim runs identity(1)→active(0): since the path starts
-    // `move(to: parent)`, `to:progress` reveals from the PARENT end, so shrinking
-    // progress 1→0 pulls the visible curve back from the child tip toward the
-    // parent — the branch retracts INTO the parent. `retractDelay` holds that
-    // retract until the child card has been swallowed into the tip first.
-    .asymmetric(
-        insertion: .modifier(
-            active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
-            identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
-            .animation(.easeInOut(duration: draw)),
-        removal: .modifier(
-            active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
-            identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
-            .animation(.easeIn(duration: draw).delay(retractDelay)))
+    // CRUCIAL: NO `.animation(...)` is attached to the transition. An attached
+    // animation here (even one matching the ambient) makes SwiftUI defer the branch's
+    // draw by ~0.5s — so the node bloomed before the branch had drawn (verified frame-
+    // by-frame). Left bare, the transition inherits the AMBIENT toggle animation
+    // (openSequenced/closeSequenced wrap the toggle in withAnimation(branchDraw)), and
+    // the branch draws/retracts promptly over branchDraw. Open/close ORDERING is
+    // sequenced in state (branch drawn before the node blooms; node swallowed before
+    // the branch retracts), not by any transition-level delay.
+    .modifier(
+        active: EdgeTrimMask(from: from, to: to, scale: scale, progress: 0),
+        identity: EdgeTrimMask(from: from, to: to, scale: scale, progress: 1))
 }
 
 /// Masks a connector with a trimmed stroke of the SAME curve; animating `progress`

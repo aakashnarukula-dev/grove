@@ -134,6 +134,17 @@ final class GraphModel: ObservableObject {
     func collapseAll() { expanded = [fs.root.path]; rebuild() }
     func refresh() { cache.removeAll(); rebuild() }
 
+    /// The node ids that expanding `node` WILL add as its direct children (folder
+    /// cards + image tiles), computed WITHOUT mutating expansion/layout. Lets the
+    /// view mark them "branch drawing, node pending" BEFORE the toggle inserts them,
+    /// so a child never flashes into the tree ahead of its branch. Reads through the
+    /// same root-scoped `children(_:)` (path-checked FolderStore) as `rebuild`, so the
+    /// ids match exactly what the layout will produce.
+    func childIDs(of node: GNode) -> [String] {
+        guard node.isDirectory else { return [] }
+        return children(node.id).map { $0.url.path }
+    }
+
     private func item(from node: GNode) -> FolderItem {
         FolderItem(id: node.id, name: node.name, url: node.url,
                    isDirectory: node.isDirectory, subfolderCount: node.count)

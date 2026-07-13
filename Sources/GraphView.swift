@@ -60,29 +60,27 @@ struct GraphView: View {
     /// THEN the branch pulls back into the parent — a clean two-step retract.
     private let cardCollapse: Double = 0.18
 
-    /// Per-child insert/remove transition: the card is BORN FROM the branch tip.
-    /// Its scale is anchored at the LEADING (left-port) side — the exact point where
-    /// the branch connects to the card — and starts from essentially a POINT (~2%),
-    /// so on open it BUDS out of the tip and unfolds into the full card (fading up as
-    /// it grows), never a rectangle sliding in from the left. It emerges only AFTER
+    /// Per-child insert/remove transition: the card appears IN PLACE at its final
+    /// position — a pure opacity fade at FULL SIZE, with no scale and no slide, so it
+    /// never grows out of a corner or slides in from the left. It fades up only AFTER
     /// its branch has inked out to the tip (openDelay ≈ branchDraw · nodeLandFraction).
     /// All of a node's children land TOGETHER — no sibling stagger. On collapse each
-    /// card is SWALLOWED back into that same tip point (scale → point at the leading
-    /// port, fading out); the branch retract is DELAYED by `cardCollapse` so the card
-    /// vanishes into the tip FIRST, then the branch pulls back into the parent.
-    /// A `.transition(...)`, i.e. a transient transform SwiftUI applies only during
+    /// card fades out IN PLACE FIRST (over `cardCollapse`), then the branch retracts
+    /// into the parent — the branch retract is DELAYED by exactly `cardCollapse`
+    /// elsewhere, so the card vanishes before the branch pulls back.
+    /// A `.transition(...)`, i.e. a transient effect SwiftUI applies only during
     /// insert/remove — NOT a persistent `.scaleEffect` (that rasterizes then upscales
     /// and blurs text).
     private var growTransition: AnyTransition {
         let openDelay = branchDraw * nodeLandFraction
         return .asymmetric(
-            // Bud from the tip: near-zero scale at the leading (branch-connection)
-            // port, unfolding into the card. Well-damped settle — placed, not bouncy.
-            insertion: .scale(scale: 0.02, anchor: .leading).combined(with: .opacity)
-                .animation(.spring(response: 0.26, dampingFraction: 0.9).delay(openDelay)),
-            // Suck back into the tip point (same leading anchor), quick + snappy, so
-            // it's gone before the branch begins retracting into the parent.
-            removal: .scale(scale: 0.02, anchor: .leading).combined(with: .opacity)
+            // Appear IN PLACE at the tip, full size — a pure fade, no scale, no slide.
+            // Fades up only AFTER its branch has inked out to the tip (openDelay).
+            insertion: .opacity
+                .animation(.easeOut(duration: 0.16).delay(openDelay)),
+            // Fade out in place FIRST (over cardCollapse), before the branch retracts
+            // into the parent — the branch retract is delayed by cardCollapse elsewhere.
+            removal: .opacity
                 .animation(.easeIn(duration: cardCollapse)))
     }
 
